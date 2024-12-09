@@ -35,6 +35,7 @@ pip install -r requirements.txt
 ## Environment Setup
 
 1. Create a `.env` file in the project root:
+
 ```env
 OPENAI_API_KEY=your_openai_api_key_here
 ```
@@ -64,16 +65,19 @@ Options:
 ### Examples
 
 1. Basic scraping:
+
 ```bash
 python documentation_scraper.py https://docs.example.com
 ```
 
 2. High-throughput scraping:
+
 ```bash
 python documentation_scraper.py --max-tokens 50000 --concurrent 3 https://docs.example.com
 ```
 
 3. Multiple documentation sites:
+
 ```bash
 python documentation_scraper.py https://docs.site1.com https://docs.site2.com
 ```
@@ -81,6 +85,7 @@ python documentation_scraper.py https://docs.site1.com https://docs.site2.com
 ## Output
 
 The scraper generates markdown files in the `documentation` directory:
+
 - `site_documentation.md`: Main documentation file
 - Includes:
   - Document information
@@ -100,6 +105,7 @@ The scraper generates markdown files in the `documentation` directory:
 ## Code Block Support
 
 Prioritizes and formats:
+
 - Python
 - JavaScript
 - Node.js
@@ -132,18 +138,21 @@ Prioritizes and formats:
 ### Common Issues
 
 1. Connection pool warnings:
+
 ```bash
 # Reduce concurrent processing
 python documentation_scraper.py --concurrent 2 [URL]
 ```
 
 2. Token limit reached:
+
 ```bash
 # Increase token limit
 python documentation_scraper.py --max-tokens 50000 [URL]
 ```
 
 3. Selenium issues:
+
 ```bash
 # Try without Selenium
 python documentation_scraper.py --no-selenium [URL]
@@ -152,6 +161,7 @@ python documentation_scraper.py --no-selenium [URL]
 ### Debug Mode
 
 Enable debug logging:
+
 ```bash
 export PYTHONPATH=.
 python -m logging -v DEBUG documentation_scraper.py [URL]
