@@ -1,1 +1,27 @@
- 
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project specific
+documentation/
+*.log
+chromedriver*
+
+# Additional files to ignore
+vitwe2.md
+vite.md
+vite_documentation2.md
+openai_documentation.md
+oldcode.md 
