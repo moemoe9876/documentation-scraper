@@ -1,6 +1,6 @@
 # Documentation Scraper
 
-A powerful documentation scraper that converts web-based documentation into well-structured markdown files with intelligent token management and language filtering.
+A powerful documentation scraper that converts web-based documentation into well-structured markdown files with intelligent token management, language filtering, and AI-powered content refinement.
 
 ## Features
 
@@ -12,6 +12,11 @@ A powerful documentation scraper that converts web-based documentation into well
 - 🔄 Deduplication of content and code blocks
 - 📊 Progress monitoring and reporting
 - 🛑 Graceful termination handling
+- 🤖 AI-powered content refinement
+  - Technical documentation analysis
+  - Structure and clarity improvements
+  - Code example enhancement
+  - Terminology consistency checks
 
 ## Prerequisites
 
@@ -98,7 +103,7 @@ The scraper generates markdown files in the `documentation` directory:
 
 - Default limit: 20,000 tokens
 - Adjustable via `--max-tokens`
-- Cost tracking for:
+- Cost tracking for (gpt-4o-mini):
   - Input tokens ($0.075/1M tokens)
   - Output tokens ($0.300/1M tokens)
 
@@ -182,3 +187,31 @@ MIT License - See LICENSE file for details
 - OpenAI for API support
 - Selenium for dynamic content handling
 - Beautiful Soup for HTML parsing
+
+## Content Refinement
+
+The scraper includes a two-stage AI-powered content refinement process:
+
+### Stage 1: Documentation Analysis
+
+An AI specialist analyzes each section focusing on:
+- Technical accuracy and completeness
+- Structure and organization
+- Clarity and readability
+- Code examples and explanations
+- Missing or unclear information
+- Consistency in terminology
+- Documentation best practices
+
+### Stage 2: Content Enhancement
+
+Based on the analysis, a second AI process refines the content by:
+- Addressing critique points
+- Maintaining core information
+- Improving clarity and readability
+- Enhancing technical accuracy
+- Ensuring consistent terminology
+- Optimizing structure
+- Improving code examples
+
+This refinement process runs automatically during the final documentation generation phase.

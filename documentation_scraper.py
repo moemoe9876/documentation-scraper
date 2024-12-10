@@ -10,7 +10,8 @@ import asyncio
 from datetime import datetime
 from urllib.parse import urljoin, urlparse
 import httpx 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
+from bs4.element import Tag
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from selenium import webdriver
@@ -66,7 +67,8 @@ class TokenConfig:
         
     def is_limit_reached(self, current_tokens):
         """Check if token limit is reached."""
-        return current_tokens >= self.max_tokens
+        # Add some buffer to prevent going over limit
+        return current_tokens >= (self.max_tokens * 0.98)  # Stop at 98% to prevent overflow
         
     def get_remaining_capacity(self, current_tokens):
         """Get remaining capacity percentage."""
@@ -195,6 +197,11 @@ class LanguageFilter:
     def __init__(self, primary_language='en'):
         self.primary_language = primary_language
         self.cache = {}  # Cache detection results
+        # Add common English words that should always pass
+        self.common_english_words = {
+            'documentation', 'docs', 'api', 'reference', 'guide', 'overview',
+            'introduction', 'getting started', 'home', 'index', 'main'
+        }
         
     def is_primary_language(self, text: str, min_length: int = 50) -> bool:
         """
@@ -207,17 +214,25 @@ class LanguageFilter:
         Returns:
             bool: True if text is in primary language
         """
-        if not text or len(text.strip()) < min_length:
-            return True  # Too short to reliably detect
+        # Clean and normalize the text
+        cleaned_text = text.strip().lower()
+        
+        # Always accept common English words/phrases
+        if any(word in cleaned_text for word in self.common_english_words):
+            return True
+            
+        # Skip language detection for very short texts
+        if len(cleaned_text) < min_length:
+            return True
             
         # Check cache first
-        cache_key = hash(text[:1000])  # Use first 1000 chars for cache key
+        cache_key = hash(cleaned_text[:1000])  # Use first 1000 chars for cache key
         if cache_key in self.cache:
             return self.cache[cache_key]
             
         try:
             # Detect language from a sample of the text for efficiency
-            sample = text[:1000] if len(text) > 1000 else text
+            sample = cleaned_text[:1000] if len(cleaned_text) > 1000 else cleaned_text
             detected = detect(sample) == self.primary_language
             self.cache[cache_key] = detected
             return detected
@@ -382,12 +397,21 @@ class DocumentationScraper:
             chrome_options.add_argument('--allow-running-insecure-content')
             chrome_options.add_argument('--ignore-certificate-errors')
             chrome_options.add_argument('--window-size=1920,1080')
+            
+            # Add these new options for better site compatibility
+            chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+            chrome_options.add_argument('--disable-features=IsolateOrigins,site-per-process')
+            chrome_options.add_argument('--disable-site-isolation-trials')
+            
+            # Add common headers
             chrome_options.add_argument('user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
             
+            # Initialize the driver with a longer page load timeout
             self.driver = webdriver.Chrome(
                 service=Service(ChromeDriverManager().install()),
                 options=chrome_options
             )
+            self.driver.set_page_load_timeout(30)  # Increase timeout to 30 seconds
         
         # Default priorities if none provided
         self.priorities = priorities or {
@@ -474,27 +498,68 @@ class DocumentationScraper:
             return response.text
 
     def _get_selenium_content(self, url):
-        """Get page content using Selenium with better code block handling."""
-        try:
-            self.driver.get(url)
-            
-            # Wait for main content to load
-            WebDriverWait(self.driver, 20).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "main, article, .docs-content, [class*='documentation'], [class*='content']"))
-            )
-            
-            # Wait for dynamic navigation to load
-            WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "nav, .sidebar, [class*='navigation']"))
-            )
-            
-            # Wait additional time for dynamic content
-            time.sleep(3)
-            
-            return self.driver.page_source
-        except Exception as e:
-            logger.error(f"Error loading page with Selenium: {str(e)}")
-            return None
+        """Get page content using Selenium with better error handling and retry logic."""
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                # Clear cookies and cache before loading the page
+                self.driver.delete_all_cookies()
+                
+                # Load the page
+                self.driver.get(url)
+                
+                # Wait for the page to be fully loaded
+                WebDriverWait(self.driver, 30).until(
+                    lambda d: d.execute_script('return document.readyState') == 'complete'
+                )
+                
+                # Add a small delay to allow dynamic content to load
+                time.sleep(2)
+                
+                # Try multiple selectors for content
+                content_selectors = [
+                    "main",
+                    "article",
+                    ".docs-content",
+                    "[class*='documentation']",
+                    "[class*='content']",
+                    "#content",
+                    ".main-content",
+                    "body"  # Fallback to body if nothing else matches
+                ]
+                
+                for selector in content_selectors:
+                    try:
+                        WebDriverWait(self.driver, 5).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                        )
+                        break
+                    except:
+                        continue
+                
+                # Get the page source after content is loaded
+                page_source = self.driver.page_source
+                
+                if page_source and len(page_source.strip()) > 0:
+                    return page_source
+                    
+                retry_count += 1
+                if retry_count < max_retries:
+                    logger.warning(f"Retry {retry_count} for {url}")
+                    time.sleep(2 * retry_count)  # Exponential backoff
+                    
+            except Exception as e:
+                logger.warning(f"Attempt {retry_count + 1} failed for {url}: {str(e)}")
+                retry_count += 1
+                if retry_count < max_retries:
+                    time.sleep(2 * retry_count)
+                else:
+                    logger.error(f"Failed to load {url} after {max_retries} attempts")
+                    return None
+                    
+        return None
 
     def extract_code_blocks(self, soup):
         """Enhanced code block extraction with language filtering and deduplication."""
@@ -655,117 +720,135 @@ class DocumentationScraper:
         return content_text, True
 
     async def process_page(self, url, client):
-        """Process a single documentation page with deduplication."""
-        retries = 3
-        while retries > 0:
-            try:
-                async with self.semaphore:
-                    # Add delay between requests to prevent overwhelming the server
-                    await asyncio.sleep(0.5)
-                    
-                    html_content = await self.get_page_content(url, client)
-                    if not html_content:
-                        logger.error(f"Failed to get content for {url}")
+        """Process a single documentation page with better error handling."""
+        try:
+            async with self.semaphore:
+                # Add delay between requests
+                await asyncio.sleep(1)
+                
+                # Try to get content
+                html_content = await self.get_page_content(url, client)
+                if not html_content:
+                    logger.error(f"Could not get content for {url}, trying fallback method")
+                    # Fallback to regular HTTP request if Selenium fails
+                    try:
+                        response = await client.get(url, follow_redirects=True)
+                        html_content = response.text
+                    except Exception as e:
+                        logger.error(f"Fallback request failed for {url}: {str(e)}")
                         return None
-                    
-                    soup = BeautifulSoup(html_content, 'html.parser')
-                    
-                    # Extract main content
-                    main_content = (
-                        soup.find('main') or 
-                        soup.find('article') or 
-                        soup.find('div', class_='content') or
-                        soup.find('div', class_=lambda x: x and ('docs' in x.lower() or 'documentation' in x.lower())) or
-                        soup.find('div', class_=lambda x: x and 'main' in x.lower()) or
-                        soup.find('div', class_=lambda x: x and 'content' in x.lower())
-                    )
-                    
-                    if not main_content:
-                        logger.error(f"No main content found for {url}")
-                        return None
-                    
-                    # Extract and validate content
-                    content_text, is_english = self.extract_content(main_content)
-                    if not is_english:
-                        return None
-                    
-                    # Get page title
-                    title = (
-                        soup.find('h1') or 
-                        soup.find('title') or
-                        soup.find(['h1', 'h2'], class_=lambda x: x and ('title' in x.lower() if x else False))
-                    )
-                    title = title.get_text().strip() if title else url.split('/')[-1].replace('-', ' ').title()
-                    
-                    # Validate title language
-                    if not self.language_filter.is_primary_language(title, min_length=10):
-                        logger.info(f"Skipping page with non-English title: {title}")
-                        return None
-                    
-                    # Extract code examples with enhanced detection
-                    code_examples = self.extract_code_blocks(main_content)
-                    
-                    # Extract and filter links
-                    links = self.extract_links(soup)
-                    
-                    # Use OpenAI to convert to clean markdown
-                    response = await openai_client.chat.completions.create(
-                        model="gpt-4o-mini",
-                        messages=[
-                            {"role": "system", "content": SYSTEM_PROMPT},
-                            {"role": "user", "content": f"Title: {title}\n\nContent: {content_text}"}
-                        ],
-                        temperature=0
-                    )
-                    
-                    # Update token tracking
-                    self.token_counter.add_api_call_usage(
-                        response.usage.prompt_tokens,
-                        response.usage.completion_tokens
-                    )
-                    
-                    # Validate generated content
-                    generated_content = response.choices[0].message.content
-                    if not self.language_filter.is_primary_language(generated_content):
-                        logger.warning("Generated content appears to be non-English, skipping")
-                        return None
-                    
-                    # Check for duplicate title
-                    if title.lower().strip() in self.seen_titles:
-                        logger.info(f"Skipping duplicate title: {title}")
-                        return None
-                    self.seen_titles.add(title.lower().strip())
-                    
-                    # Check for duplicate content
-                    if self.is_duplicate_content(content_text):
-                        logger.info(f"Skipping duplicate content for: {url}")
-                        return None
-                    
-                    # Deduplicate generated content
-                    if self.is_duplicate_content(generated_content):
-                        logger.info(f"Skipping duplicate generated content for: {url}")
-                        return None
-                    
-                    return {
-                        'title': title,
-                        'content': generated_content,
-                        'links': links,
-                        'code_examples': code_examples,
-                        'language': 'en'
-                    }
-                    
-            except httpx.TransportError as e:
-                retries -= 1
-                if retries > 0:
-                    await asyncio.sleep(1)
-                    continue
-                logger.error(f"Transport error processing {url} after all retries: {str(e)}")
-                return None
-            except Exception as e:
-                logger.error(f"Error processing {url}: {str(e)}")
-                return None
-            break  # Success, exit retry loop
-        return None  # All retries failed
+
+                # Parse the HTML content
+                soup = BeautifulSoup(html_content, 'html.parser')
+                
+                # Extract main content
+                main_content = (
+                    soup.find('main') or 
+                    soup.find('article') or 
+                    soup.find('div', class_='content') or
+                    soup.find('div', class_=lambda x: x and ('docs' in x.lower() or 'documentation' in x.lower())) or
+                    soup.find('div', class_=lambda x: x and 'main' in x.lower()) or
+                    soup.find('div', class_=lambda x: x and 'content' in x.lower())
+                )
+                
+                if not main_content:
+                    logger.error(f"No main content found for {url}")
+                    return None
+                
+                # Extract and validate content
+                content_text, is_english = self.extract_content(main_content)
+                if not is_english:
+                    return None
+                
+                # Get page title with better fallback options
+                title = None
+                title_elements = [
+                    soup.find('h1'),
+                    soup.find('title'),
+                    soup.find(lambda tag: tag.name in ['h1', 'h2'] and 
+                             tag.get('class') and 
+                             any('title' in cls.lower() for cls in tag.get('class', []))),
+                    soup.find('meta', attrs={'property': 'og:title'}),
+                    soup.find('meta', attrs={'name': 'title'})
+                ]
+                
+                for element in title_elements:
+                    if element:
+                        if isinstance(element, Tag) and element.name == 'meta':
+                            title_text = element.get('content', '').strip()
+                        else:
+                            title_text = element.get_text().strip() if element else ''
+                        if title_text and len(title_text) > 1:  # Ensure title isn't empty
+                            title = title_text
+                            break
+                
+                # Fallback to URL-based title if no title found
+                if not title:
+                    path_parts = urlparse(url).path.strip('/').split('/')
+                    title = path_parts[-1].replace('-', ' ').replace('_', ' ').title() if path_parts else 'Home'
+                
+                # More lenient title validation
+                if len(title) < 50:  # Short titles don't need language validation
+                    pass
+                elif not self.language_filter.is_primary_language(title, min_length=10):
+                    logger.info(f"Skipping page with non-English title: {title}")
+                    return None
+                
+                # Extract code examples with enhanced detection
+                code_examples = self.extract_code_blocks(main_content)
+                
+                # Extract and filter links
+                links = self.extract_links(soup)
+                
+                # Use OpenAI to convert to clean markdown
+                response = await openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": f"Title: {title}\n\nContent: {content_text}"}
+                    ],
+                    temperature=0
+                )
+                
+                # Update token tracking
+                self.token_counter.add_api_call_usage(
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens
+                )
+                
+                # Validate generated content
+                generated_content = response.choices[0].message.content
+                if not self.language_filter.is_primary_language(generated_content):
+                    logger.warning("Generated content appears to be non-English, skipping")
+                    return None
+                
+                # Check for duplicate title
+                if title.lower().strip() in self.seen_titles:
+                    logger.info(f"Skipping duplicate title: {title}")
+                    return None
+                self.seen_titles.add(title.lower().strip())
+                
+                # Check for duplicate content
+                if self.is_duplicate_content(content_text):
+                    logger.info(f"Skipping duplicate content for: {url}")
+                    return None
+                
+                # Deduplicate generated content
+                if self.is_duplicate_content(generated_content):
+                    logger.info(f"Skipping duplicate generated content for: {url}")
+                    return None
+                
+                return {
+                    'title': title,
+                    'content': generated_content,
+                    'links': links,
+                    'code_examples': code_examples,
+                    'language': 'en'
+                }
+                
+        except Exception as e:
+            logger.error(f"Error processing {url}: {str(e)}")
+            return None
 
     async def crawl(self):
         """Enhanced crawling with dynamic token management."""
@@ -894,17 +977,101 @@ class DocumentationScraper:
             
             # Save final or partial results
             if not self.terminator.terminate_now:
-                self.save_progress(final=True)
+                await self.save_progress(final=True)
             else:
-                self.save_progress(final=False)
+                await self.save_progress(final=False)
                 
         except Exception as e:
             logger.error(f"Error during crawl: {str(e)}")
-            self.save_progress(final=False)
+            await self.save_progress(final=False)
             raise
 
-    def save_progress(self, final=False):
-        """Save progress with section deduplication."""
+    async def critique_markdown(self, content: str) -> str:
+        """
+        Analyze and critique markdown content using GPT-4-mini.
+        Returns a detailed critique focusing on technical accuracy, structure, and clarity.
+        """
+        try:
+            critique_prompt = """You are a technical documentation specialist with expertise in:
+1. Technical writing and documentation standards
+2. Code documentation best practices
+3. API documentation requirements
+4. Information architecture
+5. Technical accuracy verification
+
+Analyze the provided markdown documentation and provide a detailed critique focusing on:
+1. Technical accuracy and completeness
+2. Structure and organization
+3. Clarity and readability
+4. Code examples and their explanations
+5. Missing or unclear information
+6. Consistency in terminology
+7. Documentation best practices
+
+Format your critique in a structured way that can be used by another AI to make improvements."""
+
+            response = await openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": critique_prompt},
+                    {"role": "user", "content": f"Please analyze and critique this documentation:\n\n{content}"}
+                ],
+                temperature=0.7
+            )
+
+            # Update token tracking
+            self.token_counter.add_api_call_usage(
+                response.usage.prompt_tokens,
+                response.usage.completion_tokens
+            )
+
+            return response.choices[0].message.content
+        except Exception as e:
+            logger.error(f"Error during markdown critique: {str(e)}")
+            return None
+
+    async def refine_markdown(self, content: str, critique: str) -> str:
+        """
+        Refine markdown content based on the provided critique using GPT-4-mini.
+        Returns improved markdown content.
+        """
+        try:
+            refine_prompt = """You are a technical documentation editor with expertise in improving documentation based on expert critique.
+Your task is to refine the provided markdown documentation using the critique provided.
+
+Follow these guidelines:
+1. Address all points raised in the critique
+2. Maintain the original document's core information
+3. Improve clarity and readability
+4. Enhance technical accuracy
+5. Ensure consistent terminology
+6. Optimize structure and organization
+7. Improve code examples and their explanations
+
+Return the improved markdown content."""
+
+            response = await openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": refine_prompt},
+                    {"role": "user", "content": f"Original content:\n\n{content}\n\nCritique:\n\n{critique}\n\nPlease refine the content based on this critique."}
+                ],
+                temperature=0.3
+            )
+
+            # Update token tracking
+            self.token_counter.add_api_call_usage(
+                response.usage.prompt_tokens,
+                response.usage.completion_tokens
+            )
+
+            return response.choices[0].message.content
+        except Exception as e:
+            logger.error(f"Error during markdown refinement: {str(e)}")
+            return None
+
+    async def save_progress(self, final=False):
+        """Save progress with section deduplication and content refinement."""
         try:
             # Create documentation directory if it doesn't exist
             docs_dir = Path('documentation')
@@ -915,6 +1082,20 @@ class DocumentationScraper:
             
             usage_summary = self.token_counter.get_usage_summary()
             
+            # Process content refinement if not terminating
+            if not self.terminator.terminate_now:
+                refined_contents = []
+                for content in self.processed_contents:
+                    # First, get critique of the content
+                    critique = await self.critique_markdown(content['content'])
+                    if critique:
+                        # Then refine the content based on the critique
+                        refined_content = await self.refine_markdown(content['content'], critique)
+                        if refined_content:
+                            content['content'] = refined_content
+                    refined_contents.append(content)
+                self.processed_contents = refined_contents
+
             with open(filename, 'w', encoding='utf-8') as f:
                 # Write beautiful header
                 f.write("<!-- Auto-generated documentation -->\n\n")
@@ -996,7 +1177,6 @@ async def main_async():
     args = parser.parse_args()
     
     try:
-        # Create output directory if it doesn't exist
         os.makedirs(args.output_dir, exist_ok=True)
         
         for url in args.urls:
@@ -1005,11 +1185,13 @@ async def main_async():
                 url, 
                 max_concurrent=args.concurrent,
                 use_selenium=not args.no_selenium,
-                max_tokens=args.max_tokens  # Pass max_tokens to scraper
+                max_tokens=args.max_tokens
             )
+            
+            logger.info(f"Token limit set to: {scraper.token_config.max_tokens:,}")
+            
             await scraper.crawl()
             
-            # Use the new token tracking system
             usage_summary = scraper.token_counter.get_usage_summary()
             total_tokens = usage_summary['total_tokens']
             total_cost = usage_summary['total_cost']
